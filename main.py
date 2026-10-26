@@ -75,6 +75,7 @@ def main(
             ad_defense,
             eval_mode,
             q_llm,  # type: ignore
+            logdir,
         )
         suite = get_suite("v1.2", suite_name)
         attack = attacks.load_attack(attack_name, suite, tools_pipeline)
@@ -98,6 +99,11 @@ def main(
                 )
 
         utility_results = results["utility_results"]
+        # DEF-160: stamp pass/fail onto every rejection-log record of this suite's tasks.
+        rejection_logger = getattr(tools_pipeline, "rejection_logger", None)
+        if rejection_logger is not None:
+            n = rejection_logger.backfill_task_outcomes(utility_results)
+            print(f"{suite_name} - rejection log: backfilled task_outcome on {n} records -> {rejection_logger.path}")
         total_utility_results += utility_results.values()
         print(f"{suite_name} - utility: {sum(utility_results.values()) / len(utility_results.values())}")
         if run_attack:

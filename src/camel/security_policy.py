@@ -15,6 +15,7 @@
 """Security policies for tools."""
 
 import dataclasses
+import enum
 import fnmatch
 from collections.abc import Iterable, Mapping
 from typing import Protocol
@@ -30,12 +31,43 @@ class Allowed:
     ...
 
 
+class DenialCode(str, enum.Enum):
+    """Machine-readable predicate that failed. The rejection log (DEF-160) stores this, never the free-text reason.
+
+    Engine-level codes (no `field`, raised before any per-tool policy runs):
+      DEPENDS_ON_PRIVATE  — control flow reaching this call depends on a non-public value.
+      NO_POLICY_MATCHED   — tool has side effects and no policy pattern matched; default deny.
+    Policy-level codes (always carry the `field` that failed):
+      UNTRUSTED_SOURCE    — argument must come from the user/trusted sources (`is_trusted` is False).
+      READERS_CANNOT_READ — argument is not readable by the recipients/participants/file readers.
+      NOT_PUBLIC          — argument must be public (`is_public` is False).
+      FILE_NOT_SHARED     — an attached drive file is not shared with every recipient.
+    """
+
+    DEPENDS_ON_PRIVATE = "depends_on_private"
+    NO_POLICY_MATCHED = "no_policy_matched"
+    UNTRUSTED_SOURCE = "untrusted_source"
+    READERS_CANNOT_READ = "readers_cannot_read"
+    NOT_PUBLIC = "not_public"
+    FILE_NOT_SHARED = "file_not_shared"
+
+    def __str__(self) -> str:
+        return self.value
+
+
 @dataclasses.dataclass(frozen=True)
 class Denied:
     """Denied access to the tool."""
 
     reason: str
-    """Reason for denial."""
+    """Reason for denial. Free text; may contain raw values. Never shown to the P-LLM in live mode (DEF-167)
+    and never written to the rejection log (DEF-160) — the structured fields below are what gets recorded."""
+    code: DenialCode | None = None
+    """Which predicate failed."""
+    field: str | None = None
+    """Which argument failed the predicate. `None` for engine-level denials."""
+    policy: str | None = None
+    """Name of the policy (tool-name pattern) that denied. Filled in by the engine if the policy left it unset."""
 
 
 SecurityPolicyResult = Allowed | Denied
@@ -63,7 +95,8 @@ def base_security_policy(
     """Base security policy. If *anything* in the arguments is *not* public, then access is denied."""
     r = [get_all_readers(data) for data in kwargs.values()]
     if any(reader != readers.Public() for reader in r) and tool_name not in no_side_effect_tools:
-        return Denied("Data is not public.")
+        failed = next((name for name, data in kwargs.items() if get_all_readers(data)[0] != readers.Public()), None)
+        return Denied("Data is not public.", code=DenialCode.NOT_PUBLIC, field=failed, policy="base")
     return Allowed()
 
 
@@ -89,11 +122,22 @@ class SecurityPolicyEngine(Protocol):
             return Allowed()
         non_public_variables = [d.raw for d in dependencies if not is_public(d)]
         if len(non_public_variables) > 0:
-            return Denied(f"{tool_name} is state-changing and depends on private values {non_public_variables}.")
+            return Denied(
+                f"{tool_name} is state-changing and depends on private values {non_public_variables}.",
+                code=DenialCode.DEPENDS_ON_PRIVATE,
+                policy="engine.dependencies",
+            )
         for policy_name, policy in self.policies:
             if fnmatch.fnmatch(tool_name, policy_name):
-                return policy(tool_name, kwargs)
-        return Denied("No security policy matched for tool. Defaulting to denial.")
+                res = policy(tool_name, kwargs)
+                if isinstance(res, Denied) and res.policy is None:
+                    res = dataclasses.replace(res, policy=policy_name)
+                return res
+        return Denied(
+            "No security policy matched for tool. Defaulting to denial.",
+            code=DenialCode.NO_POLICY_MATCHED,
+            policy="engine.default",
+        )
 
 
 class NoSecurityPolicyEngine(SecurityPolicyEngine):

@@ -28,7 +28,7 @@ B − A = value of within-task feedback. C − B = value of learning. Only C −
 
 ## 3. Where the hooks go
 
-- **Policy choke point:** `src/camel/interpreter/interpreter.py:2050` — one `check_policy(tool_name, kwargs, dependencies)` call per tool invocation, returns `Allowed | Denied(reason)`. Raises `SecurityPolicyDeniedError` at :2063. **DEF-160's log record is written here.**
+- **Policy choke point:** `src/camel/interpreter/interpreter.py:2050` — one `check_policy(tool_name, kwargs, dependencies)` call per tool invocation, returns `Allowed | Denied(reason)`. Raises `SecurityPolicyDeniedError` at :2063. **DEF-160's log record is written here** — done; see `REJECTION-LOG.md` for the schema, canonicalization and hash-chain rules.
 - **Retry loop:** `src/camel/pipeline_elements/privileged_llm.py::PrivilegedLLM.query` — `for _ in range(self.max_attempts)`, calls `_generate_and_interpret_code`, breaks on no `interpretation_error`. `make_error_messages` (:120) formats the error back to the P-LLM. **This is the within-task repair loop. It already exists; it just never receives policy denials** because (a) the default engine never denies and (b) `run_code` has no `except SecurityPolicyDeniedError`, so a denial would propagate as an uncaught exception and crash the task.
 - **camel-live = two changes:** pass the real engine to `PrivilegedLLM` in `make_tools_pipeline`, and catch `SecurityPolicyDeniedError` in `run_code` / `_generate_and_interpret_code`, converting it to an error message so the retry loop handles it.
 - **Memory retrieval point (DEF-162):** the system prompt or the first user message in `_generate_and_interpret_code` (`privileged_llm_messages` construction, ~:300).

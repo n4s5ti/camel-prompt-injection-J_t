@@ -22,7 +22,14 @@ from agentdojo.functions_runtime import TaskEnvironment
 
 from camel.capabilities import is_trusted
 from camel.interpreter.value import CaMeLValue
-from camel.security_policy import Allowed, Denied, SecurityPolicy, SecurityPolicyEngine, SecurityPolicyResult
+from camel.security_policy import (
+    Allowed,
+    DenialCode,
+    Denied,
+    SecurityPolicy,
+    SecurityPolicyEngine,
+    SecurityPolicyResult,
+)
 
 _E = TypeVar("_E", bound=TaskEnvironment)
 
@@ -49,7 +56,9 @@ def make_trusted_fields_policy(fields: tuple[str, ...]) -> SecurityPolicy:
         for arg_name in fields:
             arg = kwargs[arg_name]
             if not is_trusted(arg):
-                return Denied(f"{arg_name} does not come directly from user")
+                return Denied(
+                    f"{arg_name} does not come directly from user", code=DenialCode.UNTRUSTED_SOURCE, field=arg_name
+                )
         return Allowed()
 
     return policy

@@ -22,7 +22,7 @@ from camel.pipeline_elements.security_policies.agentdojo_security_policies impor
     AgentDojoSecurityPolicyEngine,
     make_trusted_fields_policy,
 )
-from camel.security_policy import NO_SIDE_EFFECT_TOOLS, Allowed, Denied, SecurityPolicyResult
+from camel.security_policy import NO_SIDE_EFFECT_TOOLS, Allowed, DenialCode, Denied, SecurityPolicyResult
 
 workspace_no_side_effect_tools = {
     "get_channels",
@@ -61,7 +61,9 @@ class SlackSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[SlackEnvironment])
         readers = {recipient.raw}
         if can_readers_read_value(readers, kwargs["body"]):
             return Allowed()
-        return Denied("The recipient can't read the content of the message.")
+        return Denied(
+            "The recipient can't read the content of the message.", code=DenialCode.READERS_CANNOT_READ, field="body"
+        )
 
     def send_channel_message_policy(self, tool_name: str, kwargs: Mapping[str, CaMeLValue]) -> SecurityPolicyResult:
         # Data:
@@ -73,7 +75,9 @@ class SlackSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[SlackEnvironment])
         channel_members = {user for user, channels in self._env.slack.user_channels.items() if channel in channels}
         if can_readers_read_value(channel_members, kwargs["body"]):
             return Allowed()
-        return Denied("The recipient can't read the content of the message.")
+        return Denied(
+            "The recipient can't read the content of the message.", code=DenialCode.READERS_CANNOT_READ, field="body"
+        )
 
     def post_webpage_policy(self, tool_name: str, kwargs: Mapping[str, CaMeLValue]) -> SecurityPolicyResult:
         # Data:
@@ -83,9 +87,9 @@ class SlackSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[SlackEnvironment])
         # - Public
         # Rationale: Only allow if content and url are public
         if not is_public(kwargs["url"]):
-            return Denied("The url is not public")
+            return Denied("The url is not public", code=DenialCode.NOT_PUBLIC, field="url")
         if not is_public(kwargs["content"]):
-            return Denied("The content is not public")
+            return Denied("The content is not public", code=DenialCode.NOT_PUBLIC, field="content")
         return Allowed()
 
     def get_webpage_policy(self, tool_name: str, kwargs: Mapping[str, CaMeLValue]) -> SecurityPolicyResult:
@@ -95,5 +99,5 @@ class SlackSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[SlackEnvironment])
         # - Public
         # Rationale: Only allow if url is public
         if not is_public(kwargs["url"]):
-            return Denied("The url is not public")
+            return Denied("The url is not public", code=DenialCode.NOT_PUBLIC, field="url")
         return Allowed()

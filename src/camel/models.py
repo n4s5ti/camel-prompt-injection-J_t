@@ -1,5 +1,6 @@
 import os
 import time
+from pathlib import Path
 
 import anthropic
 import openai
@@ -12,6 +13,7 @@ from pydantic_ai.models import KnownModelName
 
 from camel.interpreter.interpreter import MetadataEvalMode
 from camel.pipeline_elements.anthropic_tool_filter import AnthropicLLMToolFilter
+from camel.pipeline_elements.logprob_openai_llm import LogprobOpenAILLM
 from camel.pipeline_elements.privileged_llm import PrivilegedLLM
 from camel.pipeline_elements.replay_privileged_llm import PrivilegedLLMReplayer, UserInjectionTasksGetter
 from camel.pipeline_elements.security_policies import (
@@ -22,6 +24,7 @@ from camel.pipeline_elements.security_policies import (
     TravelSecurityPolicyEngine,
     WorkspaceSecurityPolicyEngine,
 )
+from camel.rejection_log import RejectionLogger
 
 _thinking_efforts = ["low", "medium", "high"]
 _oai_thinking_models = {
@@ -69,6 +72,26 @@ def _is_oai_reasoning_model(model: str) -> bool:
     return "o4" in model or "o3" in model or "o1" in model or "codex" in model
 
 
+def make_rejection_logger(logdir: Path | None, pipeline_name: str) -> RejectionLogger | None:
+    """DEF-160: one JSONL file per (run, pipeline). `None` when no logdir is given (tests, ad-hoc use).
+
+    run_id defaults to the resolved log directory name (`logs_run1`, ...) so the symlink dance in
+    `reproduce_baseline.sh` still yields distinct ids. Override with CAMEL_RUN_ID; CAMEL_EPOCH / CAMEL_SEED
+    are read for the record fields (OpenAI accepts no seed, so CAMEL_SEED is normally unset → null).
+    """
+    if logdir is None:
+        return None
+    run_id = os.getenv("CAMEL_RUN_ID") or Path(logdir).resolve().name
+    seed_env = os.getenv("CAMEL_SEED")
+    return RejectionLogger(
+        Path(logdir) / "rejection_log" / f"{pipeline_name}.jsonl",
+        run_id=run_id,
+        arm=pipeline_name,
+        seed=int(seed_env) if seed_env else None,
+        epoch=int(os.getenv("CAMEL_EPOCH", "0")),
+    )
+
+
 MODEL_NAMES.update(CAMEL_MODEL_NAMES)
 
 
@@ -101,6 +124,7 @@ def make_tools_pipeline(
     ad_defense: str | None,
     eval_mode: MetadataEvalMode,
     q_llm: KnownModelName | None,
+    logdir: Path | None = None,
 ) -> agent_pipeline.AgentPipeline:
     if "google" in model:
         # vertexai.init(project=os.getenv("GCP_PROJECT"), location=os.getenv("GCP_LOCATION"))
@@ -114,11 +138,12 @@ def make_tools_pipeline(
         llm = agent_pipeline.GoogleLLM(model.split(":")[1], client, max_tokens=max_tokens)
     elif "openai" in model:
         client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        # reasoning models do not support temperature and their "system" message is called "developer" message
+        # reasoning models do not support temperature and their "system" message is called "developer" message.
+        # LogprobOpenAILLM == agentdojo's OpenAILLM + logprobs (conf_t, DEF-160); it skips logprobs for o-series.
         if _is_oai_reasoning_model(model):
-            llm = agent_pipeline.OpenAILLM(client, model.split(":")[1], reasoning_effort, None)
+            llm = LogprobOpenAILLM(client, model.split(":")[1], reasoning_effort, None)
         else:
-            llm = agent_pipeline.OpenAILLM(client, model.split(":")[1], None)
+            llm = LogprobOpenAILLM(client, model.split(":")[1], None)
     elif "anthropic" in model:
         client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
         if thinking_budget_tokens:
@@ -177,44 +202,53 @@ def make_tools_pipeline(
             pipeline_name = f"{model.split(':')[1]}-{reasoning_effort}+camel"
         else:
             pipeline_name = f"{model.split(':')[1]}+camel"
+        # Used for logging
+        if "openai" in model and _is_oai_reasoning_model(model):
+            secpol_name = f"{model.split(':')[1]}-{reasoning_effort}+camel+secpol"
+        elif "anthropic" in model and (("3-7-sonnet" in model or "sonnet-4" in model) and thinking_budget_tokens):
+            secpol_name = f"{model.split(':')[1]}-{thinking_budget_tokens}+camel+secpol"
+        else:
+            secpol_name = f"{model.split(':')[1]}+camel+secpol"
+        if eval_mode == MetadataEvalMode.STRICT:
+            secpol_name += "+strict"
+        rejection_logger = make_rejection_logger(logdir, secpol_name)
         tools_pipeline = agent_pipeline.AgentPipeline(
             [
                 agent_pipeline.InitQuery(),
                 UserInjectionTasksGetter(),
-                PrivilegedLLMReplayer(pipeline_name, attack_name, engine, eval_mode),
+                PrivilegedLLMReplayer(pipeline_name, attack_name, engine, eval_mode, rejection_logger),
             ]
         )
+        tools_pipeline.name = secpol_name
+        tools_pipeline.rejection_logger = rejection_logger  # type: ignore[attr-defined]
+    else:
         # Used for logging
         if "openai" in model and _is_oai_reasoning_model(model):
-            tools_pipeline.name = f"{model.split(':')[1]}-{reasoning_effort}+camel+secpol"
+            camel_name = f"{model.split(':')[1]}-{reasoning_effort}+camel"
         elif "anthropic" in model and (("3-7-sonnet" in model or "sonnet-4" in model) and thinking_budget_tokens):
-            tools_pipeline.name = f"{model.split(':')[1]}-{thinking_budget_tokens}+camel+secpol"
+            camel_name = f"{model.split(':')[1]}-{thinking_budget_tokens}+camel"
         else:
-            tools_pipeline.name = f"{model.split(':')[1]}+camel+secpol"
-        if eval_mode == MetadataEvalMode.STRICT:
-            tools_pipeline.name += "+strict"
-    else:
+            camel_name = f"{model.split(':')[1]}+camel"
+
+        if q_llm:
+            camel_name += f"-q:{q_llm.split(':')[1]}"
+        rejection_logger = make_rejection_logger(logdir, camel_name)
         tools_pipeline = agent_pipeline.AgentPipeline(
             [
                 # Adds the user query to the history
                 agent_pipeline.InitQuery(),
+                # DEF-160: puts suite / user task / injection task ids into extra_args for the logger
+                UserInjectionTasksGetter(),
                 # Generates the code and writes it to `extra_args`
                 PrivilegedLLM(
                     llm,
                     ADNoSecurityPolicyEngine,
                     q_llm or model,
+                    rejection_logger=rejection_logger,
                 ),
             ]
         )
-        # Used for logging
-        if "openai" in model and _is_oai_reasoning_model(model):
-            tools_pipeline.name = f"{model.split(':')[1]}-{reasoning_effort}+camel"
-        elif "anthropic" in model and (("3-7-sonnet" in model or "sonnet-4" in model) and thinking_budget_tokens):
-            tools_pipeline.name = f"{model.split(':')[1]}-{thinking_budget_tokens}+camel"
-        else:
-            tools_pipeline.name = f"{model.split(':')[1]}+camel"
-
-        if q_llm:
-            tools_pipeline.name += f"-q:{q_llm.split(':')[1]}"
+        tools_pipeline.name = camel_name
+        tools_pipeline.rejection_logger = rejection_logger  # type: ignore[attr-defined]
 
     return tools_pipeline

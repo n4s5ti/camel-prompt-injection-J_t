@@ -43,6 +43,7 @@ from camel.pipeline_elements.privileged_llm import (
 from camel.pipeline_elements.security_policies.agentdojo_security_policies import (
     AgentDojoSecurityPolicyEngine,
 )
+from camel.rejection_log import RejectionLogger
 from camel.security_policy import NoSecurityPolicyEngine, SecurityPolicyDeniedError
 
 FunctionCall.model_rebuild()
@@ -182,6 +183,10 @@ def replay_task(
         runtime.register_function(query_ai_assistant)
         namespace = namespace.add_variables(make_agentdojo_namespace(namespace, runtime, env))
 
+        if eval_args.rejection_logger is not None and eval_args.rejection_logger.in_task:
+            # DEF-160: a replayed turn is one attempt. No logprobs exist in the saved trace → conf_t is None.
+            eval_args.rejection_logger.begin_attempt(code=turn.code)
+
         try:
             res, namespace, tool_calls_chain, dependencies = interpreter.parse_and_interpret_code(
                 turn.code, namespace, [], dependencies, eval_args
@@ -277,12 +282,14 @@ class PrivilegedLLMReplayer(BasePipelineElement):
         attack_name: str,
         security_policy_engine: type[AgentDojoSecurityPolicyEngine],
         eval_mode: interpreter.MetadataEvalMode = interpreter.MetadataEvalMode.NORMAL,
+        rejection_logger: RejectionLogger | None = None,
     ) -> None:
         super().__init__()
         self._pipeline_name = pipeline_name
         self._attack_name = attack_name
         self._eval_mode = eval_mode
         self._security_policy_engine = security_policy_engine
+        self.rejection_logger = rejection_logger
 
     def query(
         self,
@@ -299,19 +306,29 @@ class PrivilegedLLMReplayer(BasePipelineElement):
         ):
             raise ValueError("Unable to access the current user task and/or injection task ids")
         policy_engine = self._security_policy_engine(env)
-        eval_args = interpreter.EvalArgs(policy_engine, self._eval_mode)
+        eval_args = interpreter.EvalArgs(policy_engine, self._eval_mode, self.rejection_logger)
         # Attacks are not run when evaluating injection tasks as user tasks
         attack_name = self._attack_name if extra_args["injection_task_id"] is not None else None
-        new_messages, env = replay_task(
-            self._pipeline_name,
-            extra_args["task_suite_name"],
-            extra_args["user_task_id"],
-            extra_args["injection_task_id"],
-            attack_name,
-            eval_args,
-            env,
-            runtime,
-        )
+        if self.rejection_logger is not None:
+            self.rejection_logger.begin_task(
+                suite=extra_args["task_suite_name"],
+                task_id=extra_args["user_task_id"],
+                injection_task_id=extra_args["injection_task_id"],
+            )
+        try:
+            new_messages, env = replay_task(
+                self._pipeline_name,
+                extra_args["task_suite_name"],
+                extra_args["user_task_id"],
+                extra_args["injection_task_id"],
+                attack_name,
+                eval_args,
+                env,
+                runtime,
+            )
+        finally:
+            if self.rejection_logger is not None:
+                self.rejection_logger.end_task()
         return query, runtime, env, [*messages, *new_messages], extra_args
 
 

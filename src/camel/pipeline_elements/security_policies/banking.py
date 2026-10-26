@@ -22,7 +22,7 @@ from camel.interpreter.value import CaMeLValue
 from camel.pipeline_elements.security_policies.agentdojo_security_policies import (
     AgentDojoSecurityPolicyEngine,
 )
-from camel.security_policy import Allowed, Denied, SecurityPolicyResult
+from camel.security_policy import Allowed, DenialCode, Denied, SecurityPolicyResult
 
 banking_no_side_effect_tools = {
     "get_iban",
@@ -61,25 +61,35 @@ class BankingSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[BankingEnvironme
 
         recipient = kwargs["recipient"]
         if not is_trusted(recipient):
-            return Denied("The recipient does not come directly from the user.")
+            return Denied(
+                "The recipient does not come directly from the user.",
+                code=DenialCode.UNTRUSTED_SOURCE,
+                field="recipient",
+            )
 
         recipients_set = {recipient.raw}
         subject_readers, _ = get_all_readers(kwargs["subject"])
         if not can_readers_read_value(recipients_set, kwargs["subject"]):
             return Denied(
-                f"The recipients can't read the transaction subject: subject readers={subject_readers}, recipients = {recipients_set}."
+                f"The recipients can't read the transaction subject: subject readers={subject_readers}, recipients = {recipients_set}.",
+                code=DenialCode.READERS_CANNOT_READ,
+                field="subject",
             )
 
         amount_readers, _ = get_all_readers(kwargs["amount"])
         if not can_readers_read_value(recipients_set, kwargs["amount"]):
             return Denied(
-                f"The recipients can't read the transaction amount: amount readers={amount_readers}, recipients = {recipients_set}."
+                f"The recipients can't read the transaction amount: amount readers={amount_readers}, recipients = {recipients_set}.",
+                code=DenialCode.READERS_CANNOT_READ,
+                field="amount",
             )
 
         date_readers, _ = get_all_readers(kwargs["date"])
         if not can_readers_read_value(recipients_set, kwargs["date"]):
             return Denied(
-                f"The recipients can't read the transaction amount: date readers={date_readers}, recipients = {recipients_set}."
+                f"The recipients can't read the transaction amount: date readers={date_readers}, recipients = {recipients_set}.",
+                code=DenialCode.READERS_CANNOT_READ,
+                field="date",
             )
 
         return Allowed()
@@ -104,7 +114,7 @@ class BankingSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[BankingEnvironme
         # Rationale: Accept only if password comes from trusted source. Nobody can read this.
         if is_trusted(kwargs["password"]):
             return Allowed()
-        return Denied("The password does not come from the user.")
+        return Denied("The password does not come from the user.", code=DenialCode.UNTRUSTED_SOURCE, field="password")
 
     def update_user_info_policy(self, tool_name: str, kwargs: Mapping[str, CaMeLValue]) -> SecurityPolicyResult:
         # Data:
@@ -117,6 +127,9 @@ class BankingSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[BankingEnvironme
         # Rationale:
         # Here data are not revealed, so we are not concerned with that, but we want the data
         # to come from the user.
-        if all(is_trusted(kwarg) for kwarg in kwargs.values()):
+        failed = next((name for name, kwarg in kwargs.items() if not is_trusted(kwarg)), None)
+        if failed is None:
             return Allowed()
-        return Denied("The user information does not come from the user.")
+        return Denied(
+            "The user information does not come from the user.", code=DenialCode.UNTRUSTED_SOURCE, field=failed
+        )

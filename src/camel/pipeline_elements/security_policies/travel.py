@@ -23,7 +23,7 @@ from camel.pipeline_elements.security_policies.agentdojo_security_policies impor
     AgentDojoSecurityPolicyEngine,
     make_trusted_fields_policy,
 )
-from camel.security_policy import Allowed, Denied, SecurityPolicyResult
+from camel.security_policy import Allowed, DenialCode, Denied, SecurityPolicyResult
 
 workspace_travel_no_side_effect_tools = {
     # User functions
@@ -96,7 +96,9 @@ class TravelSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[TravelEnvironment
         body_readers, _ = get_all_readers(body)
         if not can_readers_read_value(recipients_set, body):
             return Denied(
-                f"Body is not public or shared with the recipients: recipients={recipients_set}, readers={body_readers}."
+                f"Body is not public or shared with the recipients: recipients={recipients_set}, readers={body_readers}.",
+                code=DenialCode.READERS_CANNOT_READ,
+                field="body",
             )
 
         # Check subject
@@ -104,7 +106,9 @@ class TravelSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[TravelEnvironment
         subject_readers, _ = get_all_readers(subject)
         if not can_readers_read_value(recipients_set, subject):
             return Denied(
-                f"Subject is not public or shared with the recipients: recipients={recipients_set}, readers={subject_readers}."
+                f"Subject is not public or shared with the recipients: recipients={recipients_set}, readers={subject_readers}.",
+                code=DenialCode.READERS_CANNOT_READ,
+                field="subject",
             )
 
         # Check attachments
@@ -117,7 +121,9 @@ class TravelSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[TravelEnvironment
         attachments_readers, _ = get_all_readers(attachments)
         if not can_readers_read_value(recipients_set, attachments):
             return Denied(
-                f"Attachments are not public or shared with the recipients: recipients={recipients_set}, readers={attachments_readers}."
+                f"Attachments are not public or shared with the recipients: recipients={recipients_set}, readers={attachments_readers}.",
+                code=DenialCode.READERS_CANNOT_READ,
+                field="attachments",
             )
         return Allowed()
 
@@ -146,5 +152,9 @@ class TravelSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[TravelEnvironment
         # The event_id should come from an email that was requested by the user directly
         event_id = kwargs["event_id"]
         if not is_trusted(event_id):
-            return Denied("Event to be deleted does not come directly from user")
+            return Denied(
+                "Event to be deleted does not come directly from user",
+                code=DenialCode.UNTRUSTED_SOURCE,
+                field="event_id",
+            )
         return Allowed()

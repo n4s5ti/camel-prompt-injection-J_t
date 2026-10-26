@@ -29,7 +29,7 @@ import pydantic
 import pydantic_ai
 from pydantic.fields import Field, FieldInfo
 
-from camel import security_policy
+from camel import rejection_log, security_policy
 from camel.capabilities import Capabilities
 from camel.capabilities.readers import Public
 from camel.capabilities.sources import Tool
@@ -140,6 +140,8 @@ class EvalArgs:
     """The list of security policies to apply."""
     eval_mode: MetadataEvalMode
     """The evaluation mode, either `STRICT` or `NORMAL`."""
+    rejection_logger: rejection_log.RejectionLogger | None = None
+    """DEF-160: if set, every tool-call policy decision is recorded here. Builtins are not recorded."""
 
 
 def _eval_formatted_value(
@@ -2047,9 +2049,10 @@ def _eval_call(
 
     try:
         # make sure policy evaluation is constant time to prevent side-channels
+        args_by_keyword_values = evaled_fn.make_args_by_keyword_preserve_values(evaled_args, evaled_kwargs)
         policy_check_result = eval_args.security_policy_engine.check_policy(
             evaled_fn.name().raw,
-            evaled_fn.make_args_by_keyword_preserve_values(evaled_args, evaled_kwargs),
+            args_by_keyword_values,
             dependencies,
         )
     except Exception as e:
@@ -2057,9 +2060,18 @@ def _eval_call(
             result.Error(CaMeLException(e, (node,), (evaled_fn,))), namespace, tool_calls_chain, dependencies
         )
 
-    if not isinstance(evaled_fn, value.CaMeLBuiltin | value.CaMeLFunction | value.CaMeLClass) and isinstance(
-        policy_check_result, security_policy.Denied
-    ):
+    # Policy subjects are tools (AgentDojo functions, query_ai_assistant). Builtins, interpreter-defined
+    # functions and classes pass through `check_policy` but can never be denied, and are not logged.
+    is_policy_subject = not isinstance(evaled_fn, value.CaMeLBuiltin | value.CaMeLFunction | value.CaMeLClass)
+
+    if is_policy_subject and eval_args.rejection_logger is not None and eval_args.rejection_logger.in_task:
+        # DEF-160: the single write point of the rejection log. Written before the denial is raised so a
+        # rejected call is recorded whether or not the caller recovers from it.
+        eval_args.rejection_logger.record(
+            evaled_fn.name().raw, args_by_keyword_values, dependencies, policy_check_result
+        )
+
+    if is_policy_subject and isinstance(policy_check_result, security_policy.Denied):
         raise security_policy.SecurityPolicyDeniedError(
             f"Execution of tool '{evaled_fn.name().raw}' denied: {policy_check_result.reason}"
         )

@@ -24,7 +24,7 @@ from camel.interpreter.value import CaMeLDict, CaMeLList, CaMeLNone, CaMeLStr, C
 from camel.pipeline_elements.security_policies.agentdojo_security_policies import (
     AgentDojoSecurityPolicyEngine,
 )
-from camel.security_policy import Allowed, Denied, SecurityPolicyResult
+from camel.security_policy import Allowed, DenialCode, Denied, SecurityPolicyResult
 
 workspace_no_side_effect_tools = {
     # Email tools
@@ -84,7 +84,9 @@ class WorkspaceSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[WorkspaceEnvir
         body_readers, _ = get_all_readers(body)
         if not can_readers_read_value(recipients_set, body):
             return Denied(
-                f"Body is not public or shared with the recipients: recipients={recipients_set}, readers={body_readers}."
+                f"Body is not public or shared with the recipients: recipients={recipients_set}, readers={body_readers}.",
+                code=DenialCode.READERS_CANNOT_READ,
+                field="body",
             )
 
         # Check subject
@@ -92,7 +94,9 @@ class WorkspaceSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[WorkspaceEnvir
         subject_readers, _ = get_all_readers(subject)
         if not can_readers_read_value(recipients_set, subject):
             return Denied(
-                f"Subject is not public or shared with the recipients: recipients={recipients_set}, readers={subject_readers}."
+                f"Subject is not public or shared with the recipients: recipients={recipients_set}, readers={subject_readers}.",
+                code=DenialCode.READERS_CANNOT_READ,
+                field="subject",
             )
 
         # Check attachments
@@ -108,13 +112,17 @@ class WorkspaceSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[WorkspaceEnvir
             file_readers = set(file.shared_with.keys())
             if not recipients_set.issubset(file_readers):
                 return Denied(
-                    f"The file with id {file.id_} is not shared with the email recipients: recipients={set(recipients_set)}, file readers = {file_readers}"
+                    f"The file with id {file.id_} is not shared with the email recipients: recipients={set(recipients_set)}, file readers = {file_readers}",
+                    code=DenialCode.FILE_NOT_SHARED,
+                    field="attachments",
                 )
 
         attachments_readers, _ = get_all_readers(attachments)
         if not can_readers_read_value(recipients_set, attachments):
             return Denied(
-                f"Attachments are not public or shared with the recipients: recipients={recipients_set}, readers={attachments_readers}."
+                f"Attachments are not public or shared with the recipients: recipients={recipients_set}, readers={attachments_readers}.",
+                code=DenialCode.READERS_CANNOT_READ,
+                field="attachments",
             )
         return Allowed()
 
@@ -127,7 +135,11 @@ class WorkspaceSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[WorkspaceEnvir
         # The email_id should come from an email that was requested by the user directly
         email_id = kwargs["email_id"]
         if is_trusted(email_id):
-            return Denied("Email to be deleted does not come directly from user")
+            return Denied(
+                "Email to be deleted does not come directly from user",
+                code=DenialCode.UNTRUSTED_SOURCE,
+                field="email_id",
+            )
         return Allowed()
 
     def create_calendar_event_policy(self, tool_name: str, kwargs: Mapping[str, CaMeLValue]) -> SecurityPolicyResult:
@@ -146,15 +158,35 @@ class WorkspaceSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[WorkspaceEnvir
             return Allowed()
         participants_set = set(participants.raw)
         if not can_readers_read_value(participants_set, kwargs["title"]):
-            return Denied("The title is not public or shared with the recipients")
+            return Denied(
+                "The title is not public or shared with the recipients",
+                code=DenialCode.READERS_CANNOT_READ,
+                field="title",
+            )
         if not can_readers_read_value(participants_set, kwargs["description"]):
-            return Denied("The description is not public or shared with the recipients")
+            return Denied(
+                "The description is not public or shared with the recipients",
+                code=DenialCode.READERS_CANNOT_READ,
+                field="description",
+            )
         if not can_readers_read_value(participants_set, kwargs["location"]):
-            return Denied("The location is not public or shared with the recipients")
+            return Denied(
+                "The location is not public or shared with the recipients",
+                code=DenialCode.READERS_CANNOT_READ,
+                field="location",
+            )
         if not can_readers_read_value(participants_set, kwargs["end_time"]):
-            return Denied("The end_time is not public or shared with the recipients")
+            return Denied(
+                "The end_time is not public or shared with the recipients",
+                code=DenialCode.READERS_CANNOT_READ,
+                field="end_time",
+            )
         if not can_readers_read_value(participants_set, kwargs["start_time"]):
-            return Denied("The start_time is not public or shared with the recipients")
+            return Denied(
+                "The start_time is not public or shared with the recipients",
+                code=DenialCode.READERS_CANNOT_READ,
+                field="start_time",
+            )
         return Allowed()
 
     def cancel_calendar_event_policy(self, tool_name: str, kwargs: Mapping[str, CaMeLValue]) -> SecurityPolicyResult:
@@ -166,7 +198,11 @@ class WorkspaceSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[WorkspaceEnvir
         # The event_id should come from an email that was requested by the user directly
         event_id = kwargs["event_id"]
         if not is_trusted(event_id):
-            return Denied("Event to be deleted does not come directly from user")
+            return Denied(
+                "Event to be deleted does not come directly from user",
+                code=DenialCode.UNTRUSTED_SOURCE,
+                field="event_id",
+            )
         return Allowed()
 
     def reschedule_calendar_event_policy(
@@ -186,7 +222,9 @@ class WorkspaceSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[WorkspaceEnvir
         new_start_time_readers, _ = get_all_readers(new_start_time)
         if not can_readers_read_value(event_participants, new_start_time):
             return Denied(
-                f"Start time is not readable by the participants of the event: participants={event_participants} time_readers={new_start_time_readers}"
+                f"Start time is not readable by the participants of the event: participants={event_participants} time_readers={new_start_time_readers}",
+                code=DenialCode.READERS_CANNOT_READ,
+                field="new_start_time",
             )
 
         new_end_time = kwargs["new_end_time"]
@@ -195,7 +233,9 @@ class WorkspaceSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[WorkspaceEnvir
         new_end_time_readers, _ = get_all_readers(new_end_time)
         if not can_readers_read_value(event_participants, new_end_time):
             return Denied(
-                f"End time is not readable by the participants of the event: participants={event_participants} time_readers={new_end_time_readers}"
+                f"End time is not readable by the participants of the event: participants={event_participants} time_readers={new_end_time_readers}",
+                code=DenialCode.READERS_CANNOT_READ,
+                field="new_end_time",
             )
 
         return Allowed()
@@ -212,7 +252,11 @@ class WorkspaceSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[WorkspaceEnvir
         # passes if the participants come from the user.
         event_id = kwargs["event_id"]
         if not is_trusted(event_id):
-            return Denied("Event to be deleted does not come directly from user")
+            return Denied(
+                "Event to be deleted does not come directly from user",
+                code=DenialCode.UNTRUSTED_SOURCE,
+                field="event_id",
+            )
         return Allowed()
 
     def create_file_policy(self, tool_name: str, kwargs: Mapping[str, CaMeLValue]) -> SecurityPolicyResult:
@@ -233,7 +277,11 @@ class WorkspaceSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[WorkspaceEnvir
         # Rationale: the file_id should come directly from the user
         event_id = kwargs["file_id"]
         if not is_trusted(event_id):
-            return Denied("File ID to be deleted does not come directly from user")
+            return Denied(
+                "File ID to be deleted does not come directly from user",
+                code=DenialCode.UNTRUSTED_SOURCE,
+                field="file_id",
+            )
         return Allowed()
 
     def share_file_policy(self, tool_name: str, kwargs: Mapping[str, CaMeLValue]) -> SecurityPolicyResult:
@@ -245,7 +293,11 @@ class WorkspaceSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[WorkspaceEnvir
         # Rationale:
         email = kwargs["email"]
         if not is_trusted(email):
-            return Denied("Email to share the document with does not come directly from user")
+            return Denied(
+                "Email to share the document with does not come directly from user",
+                code=DenialCode.UNTRUSTED_SOURCE,
+                field="email",
+            )
         # TODO: we could fetch the file from the Drive and we could then match if there is a corresponding
         # file in memory in the interpreter, and check if the data in the document is private. However this
         # seems challenging
@@ -265,6 +317,8 @@ class WorkspaceSecurityPolicyEngine(AgentDojoSecurityPolicyEngine[WorkspaceEnvir
         file_readers = set(file.shared_with.keys())
         if not can_readers_read_value(file_readers, kwargs["content"]):
             return Denied(
-                "The file readers do not have access to the content that is about to be appended to the file."
+                "The file readers do not have access to the content that is about to be appended to the file.",
+                code=DenialCode.READERS_CANNOT_READ,
+                field="content",
             )
         return Allowed()

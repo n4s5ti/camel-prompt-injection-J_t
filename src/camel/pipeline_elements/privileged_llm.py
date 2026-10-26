@@ -42,6 +42,7 @@ from camel.pipeline_elements.agentdojo_function import (
 from camel.pipeline_elements.security_policies import (
     AgentDojoSecurityPolicyEngine,
 )
+from camel.rejection_log import RejectionLogger
 
 
 # Now yaml.safe_dump will work with datetime objects
@@ -220,6 +221,7 @@ class PrivilegedLLM(agent_pipeline.BasePipelineElement):
         eval_mode: interpreter.MetadataEvalMode = interpreter.MetadataEvalMode.NORMAL,
         quarantined_llm_retries: int = 10,
         max_attempts: int = 10,
+        rejection_logger: RejectionLogger | None = None,
     ) -> None:
         """Initializes the PrivilegedLLM."""
         self.llm = llm
@@ -229,6 +231,8 @@ class PrivilegedLLM(agent_pipeline.BasePipelineElement):
         self.quarantined_llm_retries = quarantined_llm_retries
         self.dummy_runtime = functions_runtime.FunctionsRuntime()
         self.max_attempts = max_attempts
+        # DEF-160: broker-side rejection log. None disables logging (tests, ad-hoc use).
+        self.rejection_logger = rejection_logger
         # Gemini thinking and o1-* do not support JSON mode, so we fall back to base base Gemini/4o
         self.quarantined_llm_model: KnownModelName = _get_quarantined_llm(quarantined_llm_model)
 
@@ -258,7 +262,7 @@ class PrivilegedLLM(agent_pipeline.BasePipelineElement):
             and an optional Exception if one occurred during interpretation.
         """
 
-        eval_args = interpreter.EvalArgs(self.security_policy_engine(env), self.eval_mode)
+        eval_args = interpreter.EvalArgs(self.security_policy_engine(env), self.eval_mode, self.rejection_logger)
 
         print(code)
 
@@ -313,11 +317,14 @@ class PrivilegedLLM(agent_pipeline.BasePipelineElement):
 
         code = None
         attempts = 5
+        llm_extra_args: dict = {}
         while (code is None or code == "") and attempts > 0:
-            _, _, _, [*_, code_message], _ = self.llm.query(
+            llm_extra_args = {}
+            _, _, _, [*_, code_message], llm_extra_args = self.llm.query(
                 query=query,
                 runtime=self.dummy_runtime,
                 messages=privileged_llm_messages,
+                extra_args=llm_extra_args,
             )
             if self.llm.name is not None and "gemini" in self.llm.name and "exp" in self.llm.name:
                 time.sleep(6)
@@ -344,6 +351,15 @@ class PrivilegedLLM(agent_pipeline.BasePipelineElement):
                 list(privileged_llm_messages),
                 namespace,
                 dependencies,
+            )
+
+        if self.rejection_logger is not None and self.rejection_logger.in_task:
+            # One interpretation attempt == one generated program. conf_t is scored over its code block.
+            self.rejection_logger.begin_attempt(
+                conf_t=llm_extra_args.get("conf_t"),
+                conf_t_scope=llm_extra_args.get("conf_t_scope"),
+                conf_t_n_tokens=llm_extra_args.get("conf_t_n_tokens"),
+                code=code,
             )
 
         model_output, tool_calls_results, interpretation_error, namespace, dependencies = self.run_code(
@@ -456,23 +472,39 @@ class PrivilegedLLM(agent_pipeline.BasePipelineElement):
         model_output = ""
         dependencies = ()
 
-        for _ in range(self.max_attempts):
-            (model_output, _, interpretation_error, messages, privileged_llm_messages, namespace, dependencies) = (
-                self._generate_and_interpret_code(
-                    query,
-                    runtime,
-                    namespace,
-                    env,
-                    messages,
-                    privileged_llm_messages,
-                    system_prompt,
-                    model_output,
-                    dependencies,
+        if self.rejection_logger is not None:
+            # Task identity comes from `UserInjectionTasksGetter` (must precede this element in the pipeline).
+            if "user_task_id" not in extra_args or "task_suite_name" not in extra_args:
+                raise ValueError(
+                    "rejection logging needs UserInjectionTasksGetter before PrivilegedLLM in the pipeline"
                 )
+            self.rejection_logger.begin_task(
+                suite=extra_args["task_suite_name"],
+                task_id=extra_args["user_task_id"],
+                injection_task_id=extra_args.get("injection_task_id"),
             )
 
-            if not interpretation_error:
-                break  # Exit loop if no error
+        try:
+            for _ in range(self.max_attempts):
+                (model_output, _, interpretation_error, messages, privileged_llm_messages, namespace, dependencies) = (
+                    self._generate_and_interpret_code(
+                        query,
+                        runtime,
+                        namespace,
+                        env,
+                        messages,
+                        privileged_llm_messages,
+                        system_prompt,
+                        model_output,
+                        dependencies,
+                    )
+                )
+
+                if not interpretation_error:
+                    break  # Exit loop if no error
+        finally:
+            if self.rejection_logger is not None:
+                self.rejection_logger.end_task()
 
         extra_args["camel_namespace"] = namespace
         if messages[-1]["role"] == "user" and "\n\nTraceback" in ad_types.get_text_content_as_str(
