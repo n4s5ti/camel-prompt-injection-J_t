@@ -73,6 +73,12 @@ Consequences, pre-registered:
 - Cerebras `gpt-oss-120b` rejects `response_format` + `tools` in one request. The quarantined LLM uses pydantic_ai structured output; if it trips this, switch Q-LLM to `qwen-3.8-27b` via `--q-llm openai:qwen-3.8-27b` and record it.
 - Rate limits: a full run is ~10–20M tokens. Needs the paid tier; free tier's daily cap will kill the run mid-suite.
 
+## 10. Model decision, second correction (2026-10-26 evening) — gpt-4o has no row in the paper
+
+Run1 uses `openai:gpt-4o-2024-08-06` on api.openai.com (reverted from §9's Cerebras choice because a real OpenAI key became available). The stated reason was "true reproduction of the paper's row." **There is no such row.** `analysis.ipynb` cell 10 (`tab:utility`) covers Gemini 2.5 Flash/Pro, Claude 4 Sonnet (±16k thinking), o3 High, o4-mini High. The 84/77 headline is **o3 High** (84.5 → 77.3). gpt-4o-2024-08-06 exists only in `src/camel/models.py:46` as a supported model / attack self-name.
+
+So §9's framing applies to gpt-4o exactly as it did to gpt-oss-120b: **DEF-159 establishes our baseline; it does not reproduce 84/77.** Carry-over checks: undefended utility > camel+secpol utility; camel+secpol targeted ASR ≈ 0. Model stays gpt-4o because o3 returns no logprobs (§5). Run1 step 1/4 undefended utility: 0.742 overall (ws .675 / slack .952 / travel .600 / banking .813) — not a miss, just gpt-4o's number.
+
 ## 7. Reproduce commands
 
 See `reproduce_baseline.sh`. Order matters: arm A requires the `+camel` run to exist first (replay reads its logs).

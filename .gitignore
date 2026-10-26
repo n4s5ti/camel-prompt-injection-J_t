@@ -199,6 +199,8 @@ Temporary Items
 .zed
 
 logs
+# P-DEF-12: per-run AgentDojo log dirs (reproduce_baseline.sh symlinks logs -> logs_runN)
+logs_run*/
 plots
 tables
 count_tokens_qllm.py
