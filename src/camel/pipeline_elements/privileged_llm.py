@@ -222,6 +222,7 @@ class PrivilegedLLM(agent_pipeline.BasePipelineElement):
         quarantined_llm_retries: int = 10,
         max_attempts: int = 10,
         rejection_logger: RejectionLogger | None = None,
+        denial_mode: interpreter.DenialMode = interpreter.DenialMode.RAISE,
     ) -> None:
         """Initializes the PrivilegedLLM."""
         self.llm = llm
@@ -233,6 +234,9 @@ class PrivilegedLLM(agent_pipeline.BasePipelineElement):
         self.max_attempts = max_attempts
         # DEF-160: broker-side rejection log. None disables logging (tests, ad-hoc use).
         self.rejection_logger = rejection_logger
+        # DEF-167: ERROR makes denials retryable within the task (arm B); RAISE crashes the task (never
+        # happens with ADNoSecurityPolicyEngine, which is why the paper's live pipeline never needed it).
+        self.denial_mode = denial_mode
         # Gemini thinking and o1-* do not support JSON mode, so we fall back to base base Gemini/4o
         self.quarantined_llm_model: KnownModelName = _get_quarantined_llm(quarantined_llm_model)
 
@@ -262,7 +266,9 @@ class PrivilegedLLM(agent_pipeline.BasePipelineElement):
             and an optional Exception if one occurred during interpretation.
         """
 
-        eval_args = interpreter.EvalArgs(self.security_policy_engine(env), self.eval_mode, self.rejection_logger)
+        eval_args = interpreter.EvalArgs(
+            self.security_policy_engine(env), self.eval_mode, self.rejection_logger, self.denial_mode
+        )
 
         print(code)
 
@@ -359,6 +365,7 @@ class PrivilegedLLM(agent_pipeline.BasePipelineElement):
                 conf_t=llm_extra_args.get("conf_t"),
                 conf_t_scope=llm_extra_args.get("conf_t_scope"),
                 conf_t_n_tokens=llm_extra_args.get("conf_t_n_tokens"),
+                conf_t_n_excluded=llm_extra_args.get("conf_t_n_excluded"),
                 code=code,
             )
 

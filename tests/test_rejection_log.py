@@ -44,6 +44,7 @@ NULLABLE = {
     "conf_t",
     "conf_t_scope",
     "conf_t_n_tokens",
+    "conf_t_n_excluded",
     "code_hash",
     "delta_to_goal",
     "lambda",
@@ -282,9 +283,30 @@ def test_record_is_the_only_writer():
 def test_score_tokens_prefers_code_block():
     tokens = ["Here", " is", " code", ":\n", "```", "python", "\n", "x", " =", " 1", "\n", "```", "\n", "done"]
     lps = [-5.0, -5.0, -5.0, -5.0, -5.0, -5.0, -5.0, -0.1, -0.2, -0.3, -0.4, -5.0, -5.0, -5.0]
-    conf, scope, n = score_tokens(tokens, lps)
-    assert scope == "code_block" and n == 4
+    conf, scope, n, excluded = score_tokens(tokens, lps)
+    assert scope == "code_block" and n == 4 and excluded == 0
     assert conf == pytest.approx(math.exp(-0.25))
-    conf, scope, n = score_tokens(["plain", " text"], [-1.0, -3.0])
+    conf, scope, n, excluded = score_tokens(["plain", " text"], [-1.0, -3.0])
     assert scope == "content" and n == 2 and conf == pytest.approx(math.exp(-2.0))
-    assert score_tokens([], []) == (None, "content", 0)
+    assert score_tokens([], []) == (None, "content", 0, 0)
+
+
+def test_score_tokens_drops_openai_sentinel():
+    """OpenAI returns -9999.0 for tokens it cannot score; one of them must not collapse conf_t to ~0."""
+    tokens = ["```", "\n", "a", " b", " c", "\n", "```"]
+    lps = [-1.0, -1.0, -0.1, -9999.0, -0.3, -1.0, -1.0]
+    conf, scope, n, excluded = score_tokens(tokens, lps)
+    assert scope == "code_block" and n == 3 and excluded == 1  # 'a', ' c' and the newline inside the fence
+    assert conf == pytest.approx(math.exp((-0.1 - 0.3 - 1.0) / 3))
+    assert score_tokens(["x"], [-9999.0]) == (None, "content", 0, 1)
+
+
+def test_task_run_n_counts_agentdojo_reinvocations(tmp_path):
+    log = rejection_log.RejectionLogger(tmp_path / "log.jsonl", run_id="r", arm="a")
+    runs = []
+    for key in [("s", "t1", None), ("s", "t1", None), ("s", "t1", None), ("s", "t2", None), ("s", "t1", None)]:
+        log.begin_task(*key)
+        log.begin_attempt()
+        runs.append(log.record("send_email", {}, [], security_policy.Allowed())["task_run_n"])
+        log.end_task()
+    assert runs == [1, 2, 3, 1, 1]

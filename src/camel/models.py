@@ -11,7 +11,7 @@ from google import genai
 from openai.types.chat import ChatCompletionReasoningEffort
 from pydantic_ai.models import KnownModelName
 
-from camel.interpreter.interpreter import MetadataEvalMode
+from camel.interpreter.interpreter import DenialMode, MetadataEvalMode
 from camel.pipeline_elements.anthropic_tool_filter import AnthropicLLMToolFilter
 from camel.pipeline_elements.logprob_openai_llm import LogprobOpenAILLM
 from camel.pipeline_elements.privileged_llm import PrivilegedLLM
@@ -56,7 +56,7 @@ _supported_model_names = {
     "gpt-oss-120b": "ChatGPT",
     "qwen-3.8-27b": "Qwen",
 } | _oai_thinking_models_with_effort
-suffixes = ["", "+camel", "+camel+secpol", "+camel+secpol+strict"]
+suffixes = ["", "+camel", "+camel+secpol", "+camel+secpol+strict", "+camel+live", "+camel+live+strict"]
 
 CAMEL_MODEL_NAMES = {f"{model}{suffix}": name for model, name in _supported_model_names.items() for suffix in suffixes}
 
@@ -125,7 +125,12 @@ def make_tools_pipeline(
     eval_mode: MetadataEvalMode,
     q_llm: KnownModelName | None,
     logdir: Path | None = None,
+    live_policies: bool = False,
 ) -> agent_pipeline.AgentPipeline:
+    if live_policies and (use_original or replay_with_policies):
+        raise ValueError(
+            "--live-policies is its own arm; combine with neither --use-original nor --replay-with-policies"
+        )
     if "google" in model:
         # vertexai.init(project=os.getenv("GCP_PROJECT"), location=os.getenv("GCP_LOCATION"))
         # llm = GoogleLLM(model.split(":")[1])
@@ -232,6 +237,12 @@ def make_tools_pipeline(
 
         if q_llm:
             camel_name += f"-q:{q_llm.split(':')[1]}"
+        if live_policies:
+            # DEF-167, arm B: the real per-suite engine at generation time; denials come back to the
+            # P-LLM sanitized through the existing retry loop instead of terminating the task.
+            camel_name = camel_name.replace("+camel", "+camel+live", 1)
+            if eval_mode == MetadataEvalMode.STRICT:
+                camel_name += "+strict"
         rejection_logger = make_rejection_logger(logdir, camel_name)
         tools_pipeline = agent_pipeline.AgentPipeline(
             [
@@ -242,9 +253,11 @@ def make_tools_pipeline(
                 # Generates the code and writes it to `extra_args`
                 PrivilegedLLM(
                     llm,
-                    ADNoSecurityPolicyEngine,
+                    engine if live_policies else ADNoSecurityPolicyEngine,
                     q_llm or model,
+                    eval_mode=eval_mode if live_policies else MetadataEvalMode.NORMAL,  # upstream: +camel ignores it
                     rejection_logger=rejection_logger,
+                    denial_mode=DenialMode.ERROR if live_policies else DenialMode.RAISE,
                 ),
             ]
         )

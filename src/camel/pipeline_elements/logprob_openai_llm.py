@@ -20,6 +20,7 @@ plus `logprobs=True` on the request. After each call it writes into `extra_args`
   conf_t          exp(mean token logprob) over the scored span, in (0, 1]; None if the provider returned none
   conf_t_scope    "code_block" if a ```fenced``` block was found and scored, else "content"
   conf_t_n_tokens number of tokens scored
+  conf_t_n_excluded number of sentinel (-9999.0) tokens dropped from the mean
 
 The span is the *first* fenced code block in the assistant content (what the interpreter will run). Reasoning
 models (o-series) do not return logprobs; for them `conf_t` is None and the request does not ask for them.
@@ -44,6 +45,9 @@ from openai.types.chat import (
 from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_random_exponential
 
 _FENCE_RE = re.compile(r"```[a-zA-Z0-9_+-]*[ \t]*\r?\n(.*?)```", re.S)
+# OpenAI reports tokens it cannot score as logprob == -9999.0. One such token in a 150-token block drives
+# exp(mean) to ~1e-30, so they are excluded from the mean and counted separately.
+SENTINEL_LOGPROB = -9990.0
 
 
 @retry(
@@ -72,11 +76,12 @@ def _chat_completion_request_with_logprobs(
     )
 
 
-def score_tokens(tokens: Sequence[str], logprobs: Sequence[float]) -> tuple[float | None, str, int]:
-    """Returns (conf_t, scope, n_tokens). conf_t = exp(mean logprob) over the first fenced code block if one
-    exists in the concatenated tokens, else over all content tokens. None when there is nothing to score."""
+def score_tokens(tokens: Sequence[str], logprobs: Sequence[float]) -> tuple[float | None, str, int, int]:
+    """Returns (conf_t, scope, n_scored, n_excluded). conf_t = exp(mean logprob) over the first fenced code
+    block if one exists in the concatenated tokens, else over all content tokens. Sentinel logprobs
+    (<= SENTINEL_LOGPROB) are excluded from the mean and reported in n_excluded. None when nothing to score."""
     if not tokens:
-        return None, "content", 0
+        return None, "content", 0, 0
     text = "".join(tokens)
     m = _FENCE_RE.search(text)
     if m is None:
@@ -96,10 +101,12 @@ def score_tokens(tokens: Sequence[str], logprobs: Sequence[float]) -> tuple[floa
         if not chosen:  # degenerate fence (empty body)
             chosen = list(logprobs)
             scope = "content"
-    if not chosen:
-        return None, scope, 0
-    mean_lp = sum(chosen) / len(chosen)
-    return math.exp(mean_lp), scope, len(chosen)
+    scored = [lp for lp in chosen if lp > SENTINEL_LOGPROB]
+    n_excluded = len(chosen) - len(scored)
+    if not scored:
+        return None, scope, 0, n_excluded
+    mean_lp = sum(scored) / len(scored)
+    return math.exp(mean_lp), scope, len(scored), n_excluded
 
 
 class LogprobOpenAILLM(_oai.OpenAILLM):
@@ -138,13 +145,14 @@ class LogprobOpenAILLM(_oai.OpenAILLM):
         )
         choice = completion.choices[0]
         output = _oai._openai_to_assistant_message(choice.message)
-        conf_t, scope, n = None, "content", 0
+        conf_t, scope, n, n_excluded = None, "content", 0, 0
         if choice.logprobs is not None and choice.logprobs.content:
-            conf_t, scope, n = score_tokens(
+            conf_t, scope, n, n_excluded = score_tokens(
                 [t.token for t in choice.logprobs.content], [t.logprob for t in choice.logprobs.content]
             )
         extra_args["conf_t"] = conf_t
         extra_args["conf_t_scope"] = scope
         extra_args["conf_t_n_tokens"] = n
+        extra_args["conf_t_n_excluded"] = n_excluded
         messages = [*messages, output]
         return query, runtime, env, messages, extra_args

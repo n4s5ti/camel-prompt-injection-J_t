@@ -132,6 +132,18 @@ class MetadataEvalMode(str, enum.Enum):
         return self.value
 
 
+class DenialMode(str, enum.Enum):
+    """What a policy denial does to the running program.
+
+    `RAISE`: raise `SecurityPolicyDeniedError` out of the interpreter (arm A replay: the task terminates).
+    `ERROR`: return a trusted, sanitized `CaMeLException` so the caller's retry loop can feed it back to the
+    P-LLM (arm B camel-live, DEF-167). The namespace up to the denied statement is preserved either way.
+    """
+
+    RAISE = "RAISE"
+    ERROR = "ERROR"
+
+
 @dataclasses.dataclass(frozen=True)
 class EvalArgs:
     """Evaluation arguments that remain fixed throughout execution."""
@@ -142,6 +154,8 @@ class EvalArgs:
     """The evaluation mode, either `STRICT` or `NORMAL`."""
     rejection_logger: rejection_log.RejectionLogger | None = None
     """DEF-160: if set, every tool-call policy decision is recorded here. Builtins are not recorded."""
+    denial_mode: DenialMode = DenialMode.RAISE
+    """DEF-167: raise on denial (default, replay) or surface it as a sanitized interpretation error (live)."""
 
 
 def _eval_formatted_value(
@@ -2072,6 +2086,26 @@ def _eval_call(
         )
 
     if is_policy_subject and isinstance(policy_check_result, security_policy.Denied):
+        if eval_args.denial_mode == DenialMode.ERROR:
+            # DEF-167 (camel-live): hand the denial to the retry loop as a *trusted* exception whose text is
+            # built from {tool, policy, argument, code} only. No dependencies are attached on purpose: the
+            # message carries no data, and attaching the private values would get it redacted or, worse,
+            # would make the untrusted content reachable through `CaMeLException.dependencies`.
+            return EvalResult(
+                result.Error(
+                    CaMeLException(
+                        security_policy.SecurityPolicyDeniedError(
+                            security_policy.sanitized_denial_message(evaled_fn.name().raw, policy_check_result)
+                        ),
+                        (node,),
+                        (),
+                        Capabilities.camel(),
+                    )
+                ),
+                namespace,
+                tool_calls_chain,
+                dependencies,
+            )
         raise security_policy.SecurityPolicyDeniedError(
             f"Execution of tool '{evaled_fn.name().raw}' denied: {policy_check_result.reason}"
         )

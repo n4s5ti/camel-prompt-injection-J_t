@@ -32,6 +32,7 @@ def main(
     ad_defense: str | None = None,
     run_attack: bool = False,
     replay_with_policies: bool = False,
+    live_policies: bool = False,
     suites: list[str] | None = None,
     eval_mode: MetadataEvalMode = MetadataEvalMode.NORMAL,
     q_llm: str | None = None,
@@ -52,6 +53,8 @@ def main(
         run_attack: whether to run the attack (it uses AgentDojo's `important_instructions` attack)
         replay_with_policies: replay the run with the given model enforcing security policies. Note that the equivalent run (with same model and attack config)
             should have already been run.
+        live_policies: (DEF-167, arm B "camel-live") enforce the per-suite security policies *at generation time*; a denial is fed
+            back to the privileged LLM as a sanitized error and the within-task retry loop continues. Pipeline name `+camel+live`.
         suites: which suites to run AgentDojo on (can be a list from `["workspace", "banking", "travel", "slack"]`)
         eval_mode: which eval mode to use when propagating dependencies.
         q_llm: what model to use as a quarantined llm. If None, the same as `model` is used.
@@ -76,6 +79,7 @@ def main(
             eval_mode,
             q_llm,  # type: ignore
             logdir,
+            live_policies,
         )
         suite = get_suite("v1.2", suite_name)
         attack = attacks.load_attack(attack_name, suite, tools_pipeline)

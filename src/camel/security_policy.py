@@ -73,6 +73,17 @@ class Denied:
 SecurityPolicyResult = Allowed | Denied
 
 
+def sanitized_denial_message(tool_name: str, denied: Denied) -> str:
+    """What the P-LLM may see on a live denial (DEF-167): `{policy, tool, argument, code}` and nothing else.
+
+    `denied.reason` is free text that can embed raw private/untrusted values (e.g. the dependency check
+    interpolates `non_public_variables`). It must never reach the planner, so it is not used here.
+    """
+    where = f" on argument '{denied.field}'" if denied.field else ""
+    code = str(denied.code) if denied.code is not None else "denied"
+    return f"Tool '{tool_name}' was denied by security policy '{denied.policy or 'unknown'}'{where}: {code}."
+
+
 class SecurityPolicy(Protocol):
     def __call__(
         self,

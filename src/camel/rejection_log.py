@@ -150,12 +150,14 @@ class TaskContext:
     suite: str
     task_id: str
     injection_task_id: str | None
+    task_run_n: int = 1
     attempt_n: int = 0
     step_n: int = 0
     seen_hashes: set[str] = dataclasses.field(default_factory=set)
     conf_t: float | None = None
     conf_t_scope: str | None = None
     conf_t_n_tokens: int | None = None
+    conf_t_n_excluded: int | None = None
     code_hash: str | None = None
 
 
@@ -173,6 +175,8 @@ class RejectionLogger:
         self.seed = seed
         self.epoch = epoch
         self._ctx: TaskContext | None = None
+        self._last_task_key: tuple[str, str, str | None] | None = None
+        self._last_task_run_n = 0
         self._lock = threading.Lock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._prev_hash = self._read_last_hash()
@@ -180,7 +184,15 @@ class RejectionLogger:
     # ---- lifecycle -------------------------------------------------------------------------------------
 
     def begin_task(self, suite: str, task_id: str, injection_task_id: str | None) -> None:
-        self._ctx = TaskContext(suite=suite, task_id=task_id, injection_task_id=injection_task_id)
+        # AgentDojo's `run_task_with_pipeline` re-invokes the whole pipeline up to 3x when the final model
+        # output is None (e.g. the task ended in a traceback). Each invocation restarts attempt_n, so
+        # consecutive begin_task calls for the same task are numbered with task_run_n.
+        key = (suite, task_id, injection_task_id)
+        self._last_task_run_n = self._last_task_run_n + 1 if key == self._last_task_key else 1
+        self._last_task_key = key
+        self._ctx = TaskContext(
+            suite=suite, task_id=task_id, injection_task_id=injection_task_id, task_run_n=self._last_task_run_n
+        )
 
     def begin_attempt(
         self,
@@ -188,6 +200,7 @@ class RejectionLogger:
         conf_t: float | None = None,
         conf_t_scope: str | None = None,
         conf_t_n_tokens: int | None = None,
+        conf_t_n_excluded: int | None = None,
         code: str | None = None,
     ) -> None:
         ctx = self._require_ctx()
@@ -195,6 +208,7 @@ class RejectionLogger:
         ctx.conf_t = conf_t
         ctx.conf_t_scope = conf_t_scope
         ctx.conf_t_n_tokens = conf_t_n_tokens
+        ctx.conf_t_n_excluded = conf_t_n_excluded
         ctx.code_hash = hashlib.sha256(code.encode()).hexdigest() if code is not None else None
 
     def end_task(self) -> None:
@@ -238,6 +252,7 @@ class RejectionLogger:
             "task_id": ctx.task_id,
             "injection_task_id": ctx.injection_task_id,
             "epoch": self.epoch,
+            "task_run_n": ctx.task_run_n,
             "attempt_n": ctx.attempt_n,
             "step_n": ctx.step_n,
             "tool": tool,
@@ -254,6 +269,7 @@ class RejectionLogger:
             "conf_t": ctx.conf_t,
             "conf_t_scope": ctx.conf_t_scope,
             "conf_t_n_tokens": ctx.conf_t_n_tokens,
+            "conf_t_n_excluded": ctx.conf_t_n_excluded,
             "code_hash": ctx.code_hash,
             **{k: None for k in _DOWNSTREAM_NULL_FIELDS},
             "task_outcome": None,
@@ -359,6 +375,7 @@ def required_fields() -> tuple[str, ...]:
         "task_id",
         "injection_task_id",
         "epoch",
+        "task_run_n",
         "attempt_n",
         "step_n",
         "tool",
@@ -375,6 +392,7 @@ def required_fields() -> tuple[str, ...]:
         "conf_t",
         "conf_t_scope",
         "conf_t_n_tokens",
+        "conf_t_n_excluded",
         "code_hash",
         *_DOWNSTREAM_NULL_FIELDS,
         "task_outcome",

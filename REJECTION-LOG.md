@@ -18,7 +18,18 @@ One JSONL record per **tool-call decision** at CaMeL's policy boundary. This is 
 | --- | --- |
 | AgentDojo tool calls (`send_email`, `list_files`, …) | Builtins (`print`, `len`, `str.upper`, …) |
 | `query_ai_assistant` (always accepted; it is a no-side-effect tool) | Interpreter-defined functions and classes |
-| Both arms: live `PrivilegedLLM` and the post-hoc `PrivilegedLLMReplayer` | Tasks AgentDojo serves from its result cache (`force_rerun=False` → pipeline never runs) |
+| Both arms: live `PrivilegedLLM` and the post-hoc `PrivilegedLLMReplayer`; arm B `+camel+live` (DEF-167) | Tasks AgentDojo serves from its result cache (`force_rerun=False` → pipeline never runs) |
+
+## Arm B: what the planner sees on a denial (DEF-167)
+
+With `--live-policies`, `EvalArgs.denial_mode = ERROR`: the interpreter returns a *trusted* `CaMeLException`
+wrapping `SecurityPolicyDeniedError(sanitized_denial_message(...))` instead of raising. The text is built from
+`{tool, policy, argument, code}` only — e.g. `Tool 'send_money' was denied by security policy 'send_money' on
+argument 'recipient': untrusted_source.` — never from `Denied.reason`, which interpolates raw values. The
+exception carries no dependencies, so `format_camel_exception` shows it rather than redacting it, and the
+existing retry loop (`PrivilegedLLM.query`, `max_attempts=10`) handles it like any interpretation error:
+namespace preserved up to the denied statement, denied call never executed. `tests/test_camel_live.py` holds
+the canary tests for both the dependency-level and the policy-level denial paths.
 
 Policy subjects are exactly the callables that `_eval_call` can deny; the same predicate decides logging.
 The undefended (`--use-original`) pipeline has no interpreter and produces no log.
@@ -38,7 +49,8 @@ everything else is non-null in every record (test-enforced, smoke-verified on bo
 | `task_id` | str | | user task id |
 | `injection_task_id` | str | yes | null when not under attack |
 | `epoch` | int | | `CAMEL_EPOCH`, default 0 (DEF-165) |
-| `attempt_n` | int | | 1-based index of the generated program within the task. Live: each P-LLM retry. Replay: each saved turn. |
+| `task_run_n` | int | | 1-based pipeline invocation for this task. AgentDojo re-invokes the whole pipeline up to 3× when the final model output is `None` (a task that ended in a traceback does this); `attempt_n` restarts each time. Order attempts by (`task_run_n`, `attempt_n`, `step_n`). |
+| `attempt_n` | int | | 1-based index of the generated program within the invocation. Live: each P-LLM retry. Replay: each saved turn. |
 | `step_n` | int | | 1-based index of the decision within the task (continues across attempts) |
 | `tool` | str | | tool name |
 | `args_canonical` | object | | canonicalized arguments (below) |
@@ -54,6 +66,7 @@ everything else is non-null in every record (test-enforced, smoke-verified on bo
 | `conf_t` | float | yes | `exp(mean token logprob)` ∈ (0, 1] over the attempt's code block; null for replay and for providers without logprobs |
 | `conf_t_scope` | str | yes | `code_block` or `content` (no fence found) |
 | `conf_t_n_tokens` | int | yes | tokens scored |
+| `conf_t_n_excluded` | int | yes | tokens dropped from the mean because OpenAI returned the `-9999.0` "no logprob" sentinel. Seen on long retry contexts; one such token would otherwise collapse `conf_t` to ~1e-30. |
 | `code_hash` | str | yes | sha256 of the attempt's raw P-LLM output |
 | `delta_to_goal`, `lambda`, `looked_good`, `failed_t`, `J_t`, `verifier_miss` | | yes | null until DEF-161/163/164 |
 | `task_outcome` | str | yes | `pass` / `fail`, backfilled after the suite; null if the process died before backfill |
