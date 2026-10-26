@@ -61,6 +61,18 @@ Rule: what the P-LLM sees on denial is `{policy_name, tool_name, arg_name}` only
 
 Held-out utility is measured on **16 tasks**. One task = 6.25 points. The pre-registered "beyond run-to-run variance" bar on banking will be coarse. Report counts, not just percentages. Consider also holding out slack (21) if train-set size allows; decide before DEF-165, not after.
 
+## 9. Model decision (2026-10-26, supersedes §5's gpt-4o choice)
+
+**`gpt-oss-120b` served by Cerebras** via `OPENAI_BASE_URL=https://api.cerebras.ai/v1`. Verified against Cerebras's API reference: chat completions accepts `logprobs`, `top_logprobs`, `seed`; returns `choices[].logprobs` for content tokens and `reasoning_logprobs` separately; tool calling supported. No client code changes — the `openai` SDK and pydantic_ai both honor `OPENAI_BASE_URL`.
+
+Consequences, pre-registered:
+- The paper never ran gpt-oss-120b, so **DEF-159 is "establish our baseline," not "reproduce 84/77."** The paper's numbers are a reference. The checks that carry over: undefended utility > camel+secpol utility; camel+secpol ASR ≈ 0. A later reader seeing e.g. 70/63 must not call it a failed reproduction.
+- gpt-oss-120b is a reasoning model (MoE, ~5B active, `reasoning_effort` default medium). Not 4o-class in behavior; closer to o4-mini. `conf_t` is computed over **content** tokens only (`choices[].logprobs`), never `reasoning_logprobs`.
+- `seed` is accepted (best-effort). Pass it; still report ranges across runs.
+- AgentDojo's `important_instructions` attack addresses the model by its registered self-name (`MODEL_NAMES`). Added `gpt-oss-120b → "ChatGPT"` and `qwen-3.8-27b → "Qwen"` in `models.py`; **verify with `check_model_name.py` before the first run.** A wrong name weakens the attack and inflates security numbers.
+- Cerebras `gpt-oss-120b` rejects `response_format` + `tools` in one request. The quarantined LLM uses pydantic_ai structured output; if it trips this, switch Q-LLM to `qwen-3.8-27b` via `--q-llm openai:qwen-3.8-27b` and record it.
+- Rate limits: a full run is ~10–20M tokens. Needs the paid tier; free tier's daily cap will kill the run mid-suite.
+
 ## 7. Reproduce commands
 
 See `reproduce_baseline.sh`. Order matters: arm A requires the `+camel` run to exist first (replay reads its logs).

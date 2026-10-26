@@ -47,6 +47,11 @@ _supported_model_names = {
     "gpt-4o-mini-2024-07-18": "GPT-4",
     "gpt-4.1-2025-04-14": "ChatGPT",
     "gpt-4.1-nano-2025-04-14": "ChatGPT",
+    # --- P-DEF-12 additions: served via an OpenAI-compatible endpoint (Cerebras), set OPENAI_BASE_URL.
+    # The value is the model's self-identification, used verbatim by AgentDojo's important_instructions
+    # attack ("...to you, {name}..."). Verify with `uv run check_model_name.py` before the first run.
+    "gpt-oss-120b": "ChatGPT",
+    "qwen-3.8-27b": "Qwen",
 } | _oai_thinking_models_with_effort
 suffixes = ["", "+camel", "+camel+secpol", "+camel+secpol+strict"]
 
