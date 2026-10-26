@@ -11,9 +11,11 @@
 # model reuses cached tasks. To get an independent run, use a separate logs dir per RUN_TAG.
 
 set -euo pipefail
-MODEL="${MODEL:-openai:gpt-oss-120b}"
+MODEL="${MODEL:-openai:gpt-4o-2024-08-06}"
 RUN_TAG="${1:-run1}"
 SUITES=(workspace slack travel banking)
+# cyclopts wants the flag repeated per value, not "--suites a b c"
+SUITE_ARGS=(); for s in "${SUITES[@]}"; do SUITE_ARGS+=(--suites "$s"); done
 
 export LOGDIR="logs_${RUN_TAG}"
 mkdir -p "$LOGDIR"
@@ -24,18 +26,18 @@ echo "== [$RUN_TAG] model=$MODEL  logs -> $LOGDIR"
 echo
 
 echo "== 1/4 undefended, no attack (utility)"
-uv run --env-file .env main.py "$MODEL" --use-original --suites "${SUITES[@]}"
+uv run --env-file .env main.py "$MODEL" --use-original "${SUITE_ARGS[@]}"
 
 echo "== 2/4 undefended, under attack (utility + security)"
-uv run --env-file .env main.py "$MODEL" --use-original --run-attack --suites "${SUITES[@]}"
+uv run --env-file .env main.py "$MODEL" --use-original --run-attack "${SUITE_ARGS[@]}"
 
 echo "== 3/4 camel (no policies), no attack + under attack  [required before replay]"
-uv run --env-file .env main.py "$MODEL" --suites "${SUITES[@]}"
-uv run --env-file .env main.py "$MODEL" --run-attack --suites "${SUITES[@]}"
+uv run --env-file .env main.py "$MODEL" "${SUITE_ARGS[@]}"
+uv run --env-file .env main.py "$MODEL" --run-attack "${SUITE_ARGS[@]}"
 
 echo "== 4/4 camel + security policies (post-hoc replay of step 3)"
-uv run --env-file .env main.py "$MODEL" --replay-with-policies --suites "${SUITES[@]}"
-uv run --env-file .env main.py "$MODEL" --replay-with-policies --run-attack --suites "${SUITES[@]}"
+uv run --env-file .env main.py "$MODEL" --replay-with-policies "${SUITE_ARGS[@]}"
+uv run --env-file .env main.py "$MODEL" --replay-with-policies --run-attack "${SUITE_ARGS[@]}"
 
 echo
 echo "== done [$RUN_TAG]. Record per-suite utility/security from the output above into DEF-159."
